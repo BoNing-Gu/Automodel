@@ -4,7 +4,7 @@
 #*.ipynb
 output
 output_2048
-result
+results
 *.pt
 tests/data/asr
 .DS_Store

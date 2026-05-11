@@ -783,6 +783,9 @@ def build_lr_scheduler(cfg, optimizer, step_scheduler) -> list[OptimizerParamSch
     return optimizer_param_schedulers
 
 
+from nemo_automodel.shared.import_utils import safe_import
+HAS_SWANLAB, swanlab = safe_import("swanlab")
+
 def build_wandb(cfg) -> wandb.Run:
     """Instantiates wandb and returns the instance. If no name is given, it will use the model name.
 
@@ -800,6 +803,29 @@ def build_wandb(cfg) -> wandb.Run:
         **kwargs,
         config=cfg.to_dict(),
         settings=Settings(silent=True),
+    )
+    return run
+
+def build_swanlab(cfg):
+    """Instantiates swanlab and returns the instance. If no name is given, it will use the model name.
+
+    Args:
+        cfg: Configuration for swanlab.
+
+    Returns:
+        The swanlab instance.
+    """
+    assert cfg.get("swanlab", None) is not None
+    kwargs = cfg.swanlab.to_dict()
+    if kwargs.get("name", "") == "":
+        kwargs["name"] = "_".join(_get_model_name(cfg.model).split("/")[-2:])
+    
+    if not HAS_SWANLAB:
+        raise ImportError("swanlab is required for SwanLab logging. Please install it.")
+        
+    run = swanlab.init(
+        **kwargs,
+        config=cfg.to_dict(),
     )
     return run
 
@@ -938,6 +964,10 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             suppress_wandb_log_messages()
             run = build_wandb(self.cfg)
             logging.info("🚀 View run at {}".format(run.url))
+
+        if self.dist_env.is_main and hasattr(self.cfg, "swanlab"):
+            run = build_swanlab(self.cfg)
+            logging.info("SwanLab experiment tracking enabled")
 
         self.mlflow_logger = None
         if self.dist_env.is_main and hasattr(self.cfg, "mlflow"):
@@ -1672,6 +1702,9 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
         if wandb.run is not None:
             wandb.log(log_data.to_dict() | {"val_name": val_name}, step=log_data.step)
 
+        if HAS_SWANLAB and getattr(swanlab, "get_run", lambda: None)() is not None:
+            swanlab.log(log_data.to_dict() | {"val_name": val_name}, step=log_data.step)
+
         if self.mlflow_logger is not None:
             self.mlflow_logger.log_metrics(log_data.to_dict(), step=log_data.step)
 
@@ -1716,6 +1749,8 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
         if self.step_scheduler.is_remote_logging_step:
             if wandb.run is not None:
                 wandb.log(log_data.to_dict(), step=self.step_scheduler.step)
+            if HAS_SWANLAB and getattr(swanlab, "get_run", lambda: None)() is not None:
+                swanlab.log(log_data.to_dict(), step=self.step_scheduler.step)
             if self.mlflow_logger is not None:
                 self.mlflow_logger.log_metrics(log_data.to_dict(), step=log_data.step)
             if self.comet_logger is not None:
@@ -1725,6 +1760,8 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
         if self.step_scheduler.is_remote_logging_step:
             if wandb.run is not None:
                 self._log_moe_metrics(self.step_scheduler.step, wandb.log)
+            if HAS_SWANLAB and getattr(swanlab, "get_run", lambda: None)() is not None:
+                self._log_moe_metrics(self.step_scheduler.step, swanlab.log)
             if self.comet_logger is not None:
                 self._log_moe_metrics(
                     self.step_scheduler.step, lambda m, step: self.comet_logger.log_metrics(m, step=step)

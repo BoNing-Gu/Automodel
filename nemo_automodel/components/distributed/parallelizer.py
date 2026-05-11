@@ -335,7 +335,7 @@ class NemotronHParallelizationStrategy(ParallelizationStrategy):
         assert not sequence_parallel, "Sequence parallelism is not supported for NemotronHForCausalLM"
         logger.info("Custom parallel plan is not supported for NemotronHForCausalLM. Using NemotronH-specific TP plan.")
 
-        layers: torch.nn.ModuleList = model.backbone.layers
+        layers: torch.nn.ModuleList = model.model.layers
         tp_mesh = device_mesh[tp_mesh_name]
         if tp_mesh.size() > 1:
             model_tp_plan: dict[str, ParallelStyle] = {
@@ -349,7 +349,7 @@ class NemotronHParallelizationStrategy(ParallelizationStrategy):
 
             parallelize_module(model, tp_mesh, model_tp_plan)
 
-            for layer in model.backbone.layers:
+            for layer in model.model.layers:
                 if layer.block_type == "mlp":
                     parallelize_module(layer, tp_mesh, mlp_tp_plan)
 
