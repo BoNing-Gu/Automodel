@@ -1703,7 +1703,9 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             wandb.log(log_data.to_dict() | {"val_name": val_name}, step=log_data.step)
 
         if HAS_SWANLAB and getattr(swanlab, "get_run", lambda: None)() is not None:
-            swanlab.log(log_data.to_dict() | {"val_name": val_name}, step=log_data.step)
+            swanlab_data = log_data.to_dict() | {"val_name": val_name}
+            swanlab_data.pop("timestamp", None)
+            swanlab.log(swanlab_data, step=log_data.step)
 
         if self.mlflow_logger is not None:
             self.mlflow_logger.log_metrics(log_data.to_dict(), step=log_data.step)
@@ -1750,7 +1752,9 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             if wandb.run is not None:
                 wandb.log(log_data.to_dict(), step=self.step_scheduler.step)
             if HAS_SWANLAB and getattr(swanlab, "get_run", lambda: None)() is not None:
-                swanlab.log(log_data.to_dict(), step=self.step_scheduler.step)
+                swanlab_data = log_data.to_dict()
+                swanlab_data.pop("timestamp", None)
+                swanlab.log(swanlab_data, step=self.step_scheduler.step)
             if self.mlflow_logger is not None:
                 self.mlflow_logger.log_metrics(log_data.to_dict(), step=log_data.step)
             if self.comet_logger is not None:

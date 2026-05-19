@@ -23,10 +23,10 @@ recipe: TrainFinetuneRecipeForNextTokenPrediction
 step_scheduler:
   global_batch_size: 8
   local_batch_size: 1
-  ckpt_every_steps: 100
-  val_every_steps: 100  # will run every x number of gradient steps
+  ckpt_every_steps: null
+  val_every_steps: null  # will run every x number of gradient steps
   save_checkpoint_every_epoch: true
-  num_epochs: 1
+  num_epochs: 3
   max_steps: null
 
 dist_env:
@@ -92,7 +92,7 @@ loss_fn:
 
 dataset:
   _target_: nemo_automodel.components.datasets.llm.ChatDataset
-  path_or_dataset_id: /vepfs-mlp2/c20250602/500050/lh/lzl/kaggle_llm/nvidia-nmrc/dataset/0511-basic-solver/dataset.jsonl
+  path_or_dataset_id: /vepfs-mlp2/c20250602/500050/lh/lzl/kaggle_llm/nvidia-nmrc/dataset/0512-only-cryptarithm-deduce/dataset.jsonl
   split: null
   seq_length: 8192
   padding: "do_not_pad"
