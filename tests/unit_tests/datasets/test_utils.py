@@ -92,6 +92,7 @@ def test_batchify_adds_batch_dimension() -> None:
     assert out.ndim == 2
     assert torch.equal(out, torch.tensor([[1, 2, 3]]))
 
+
 def test_batchify_adds_batch_dimension_default_tensor_cls() -> None:
     """`batchify` must insert dim-0 in-place when given a 1-D tensor."""
     vec = [1, 2, 3]
@@ -150,7 +151,7 @@ def test_default_collater_shapes() -> None:
             "___PAD_TOKEN_IDS___": {
                 "input_ids": 0,
                 "labels": -100,
-            }
+            },
         },
         {
             "input_ids": [3],
@@ -160,7 +161,7 @@ def test_default_collater_shapes() -> None:
             "___PAD_TOKEN_IDS___": {
                 "input_ids": 0,
                 "labels": -100,
-            }
+            },
         },
     ]
 
@@ -178,7 +179,7 @@ def test_default_collater_shapes() -> None:
     # Verify returned values
     attention_mask = torch.tensor([[1, 1], [1, 0]])
     input_ids = torch.tensor([[1, 2], [3, 0]])
-    labels = torch.tensor([[ 101,  102], [ 103, -100]])
+    labels = torch.tensor([[101, 102], [103, -100]])
     loss_mask = torch.tensor([[1, 1], [1, 0]])
 
     assert torch.equal(collated["attention_mask"], attention_mask)
@@ -199,6 +200,31 @@ def test_default_collater_shapes() -> None:
     # # Sanity on dtype
     # for tensor in collated.values():
     #     assert tensor.dtype == torch.long
+
+
+def test_default_collater_preserves_string_metadata() -> None:
+    raw_batch = [
+        {
+            "input_ids": [1, 2],
+            "attention_mask": [1, 1],
+            "labels": [101, 102],
+            "sample_id": "a",
+            "sample_category": "cat_a",
+        },
+        {
+            "input_ids": [3],
+            "attention_mask": [1],
+            "labels": [103],
+            "sample_id": "b",
+            "sample_category": "cat_b",
+        },
+    ]
+
+    collated = sftp.default_collater(raw_batch)
+
+    assert collated["sample_id"] == ["a", "b"]
+    assert collated["sample_category"] == ["cat_a", "cat_b"]
+    assert torch.equal(collated["labels"], torch.tensor([[101, 102], [103, -100]]))
 
 
 def test_tokenize_function_strips_special_tokens(dummy_tokenizer: DummyTokenizer) -> None:
@@ -304,6 +330,7 @@ def test_full_process_pipeline(dummy_tokenizer: DummyTokenizer) -> None:
     first_len = len(processed[0]["input_ids"])
     assert all(len(r["input_ids"]) == first_len for r in processed)
 
+
 @pytest.mark.parametrize(
     "lst,value,expected",
     [
@@ -320,6 +347,7 @@ def test_full_process_pipeline(dummy_tokenizer: DummyTokenizer) -> None:
 )
 def test_find_last_non_pad_token(lst, value, expected):
     assert sftp.find_last_non_pad_token(lst, value) == expected
+
 
 @pytest.mark.parametrize(
     "val,expected",

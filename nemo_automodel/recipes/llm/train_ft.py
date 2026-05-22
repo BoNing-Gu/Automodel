@@ -27,6 +27,7 @@ except ImportError:
 
 import inspect
 import logging
+import math
 import pathlib
 import time
 from contextlib import nullcontext
@@ -34,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import wandb
 from huggingface_hub import constants as hf_constants
 from torch.utils.data import DataLoader, IterableDataset
@@ -111,6 +113,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_TOKEN_METRIC_SAMPLE_ID_KEY = "sample_id"
+_TOKEN_METRIC_CATEGORY_KEY = "sample_category"
+_TOKEN_METRIC_UNKNOWN_CATEGORY = "unknown"
+_TOKEN_METRIC_CE_CHUNK_SIZE = 1024
+
 
 # ---------------------------
 #  Stateless helper functions
@@ -158,6 +165,125 @@ def _get_num_thd_chunks(pp_enabled, cfg):
     if pp_enabled:
         return cfg.step_scheduler.local_batch_size // cfg.get("distributed.pipeline.pp_microbatch_size", 1)
     return 1
+
+
+def _pop_token_metric_metadata(batch: dict[str, Any]) -> tuple[list[str] | None, list[str] | None]:
+    """Remove non-model metadata from a batch and return sample ids/categories."""
+    sample_ids = batch.pop(_TOKEN_METRIC_SAMPLE_ID_KEY, None)
+    sample_categories = batch.pop(_TOKEN_METRIC_CATEGORY_KEY, None)
+    if sample_ids is not None:
+        sample_ids = [str(value) for value in sample_ids]
+    if sample_categories is not None:
+        sample_categories = [str(value) for value in sample_categories]
+    return sample_ids, sample_categories
+
+
+def _merge_token_metric_stats(stats_list: list[dict[str, dict[str, float]]]) -> dict[str, dict[str, float]]:
+    """Merge category-level token metric accumulators."""
+    merged: dict[str, dict[str, float]] = {}
+    for stats in stats_list:
+        for category, values in stats.items():
+            entry = merged.setdefault(
+                category,
+                {
+                    "loss_sum": 0.0,
+                    "token_count": 0.0,
+                    "min_logprob": float("inf"),
+                },
+            )
+            entry["loss_sum"] += float(values.get("loss_sum", 0.0))
+            entry["token_count"] += float(values.get("token_count", 0.0))
+            entry["min_logprob"] = min(entry["min_logprob"], float(values.get("min_logprob", float("inf"))))
+    return merged
+
+
+@torch.no_grad()
+def _compute_token_metric_stats(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    sample_categories: list[str] | None,
+) -> dict[str, dict[str, float]]:
+    """Compute category-level loss/logprob stats from token-level labels."""
+    if sample_categories is None:
+        return {}
+    if hasattr(logits, "full_tensor"):
+        logits = logits.full_tensor()
+    if hasattr(labels, "full_tensor"):
+        labels = labels.full_tensor()
+    if not hasattr(logits, "ndim") or not hasattr(labels, "ndim"):
+        return {}
+    if logits.ndim != 3 or labels.ndim != 2 or logits.shape[:2] != labels.shape:
+        return {}
+    if len(sample_categories) != labels.shape[0]:
+        return {}
+
+    if labels.device != logits.device:
+        labels = labels.to(logits.device)
+
+    valid_mask = labels != -100
+
+    stats: dict[str, dict[str, float]] = {}
+    for sample_idx, category in enumerate(sample_categories):
+        sample_mask = valid_mask[sample_idx]
+        token_count = int(sample_mask.sum().item())
+        if token_count == 0:
+            continue
+        loss_sum = 0.0
+        max_nll = float("-inf")
+        for start in range(0, labels.shape[1], _TOKEN_METRIC_CE_CHUNK_SIZE):
+            end = min(start + _TOKEN_METRIC_CE_CHUNK_SIZE, labels.shape[1])
+            chunk_mask = sample_mask[start:end]
+            if not bool(chunk_mask.any().item()):
+                continue
+            chunk_nll = F.cross_entropy(
+                logits[sample_idx, start:end].float(),
+                labels[sample_idx, start:end],
+                reduction="none",
+                ignore_index=-100,
+            )
+            valid_chunk_nll = chunk_nll[chunk_mask]
+            loss_sum += float(valid_chunk_nll.sum().item())
+            max_nll = max(max_nll, float(valid_chunk_nll.max().item()))
+        category = category or _TOKEN_METRIC_UNKNOWN_CATEGORY
+        entry = stats.setdefault(
+            category,
+            {
+                "loss_sum": 0.0,
+                "token_count": 0.0,
+                "min_logprob": float("inf"),
+            },
+        )
+        entry["loss_sum"] += loss_sum
+        entry["token_count"] += float(token_count)
+        entry["min_logprob"] = min(entry["min_logprob"], -max_nll)
+    return stats
+
+
+def _format_token_metrics(stats: dict[str, dict[str, float]]) -> dict[str, float]:
+    """Format merged category stats for MetricsSample/SwanLab logging."""
+    metrics: dict[str, float] = {}
+    total_loss = sum(values["loss_sum"] for values in stats.values())
+    total_tokens = sum(values["token_count"] for values in stats.values())
+    finite_min_logprobs = [values["min_logprob"] for values in stats.values() if values["token_count"] > 0]
+
+    if total_tokens > 0:
+        loss_per_token = total_loss / total_tokens
+        metrics["_loss_per_token"] = loss_per_token
+        metrics["_num_loss_tokens"] = int(total_tokens)
+        metrics["nll_per_token"] = loss_per_token
+        metrics["perplexity"] = math.exp(min(loss_per_token, 20.0))
+    if finite_min_logprobs:
+        metrics["_min_logprob"] = min(finite_min_logprobs)
+
+    for category in sorted(stats):
+        values = stats[category]
+        token_count = values["token_count"]
+        if token_count <= 0:
+            continue
+        metrics[f"_loss_per_token/{category}"] = values["loss_sum"] / token_count
+        metrics[f"_min_logprob/{category}"] = values["min_logprob"]
+        metrics[f"_num_loss_tokens/{category}"] = int(token_count)
+    return metrics
 
 
 def build_model(
@@ -784,7 +910,9 @@ def build_lr_scheduler(cfg, optimizer, step_scheduler) -> list[OptimizerParamSch
 
 
 from nemo_automodel.shared.import_utils import safe_import
+
 HAS_SWANLAB, swanlab = safe_import("swanlab")
+
 
 def build_wandb(cfg) -> wandb.Run:
     """Instantiates wandb and returns the instance. If no name is given, it will use the model name.
@@ -806,6 +934,7 @@ def build_wandb(cfg) -> wandb.Run:
     )
     return run
 
+
 def build_swanlab(cfg):
     """Instantiates swanlab and returns the instance. If no name is given, it will use the model name.
 
@@ -819,10 +948,10 @@ def build_swanlab(cfg):
     kwargs = cfg.swanlab.to_dict()
     if kwargs.get("name", "") == "":
         kwargs["name"] = "_".join(_get_model_name(cfg.model).split("/")[-2:])
-    
+
     if not HAS_SWANLAB:
         raise ImportError("swanlab is required for SwanLab logging. Please install it.")
-        
+
     run = swanlab.init(
         **kwargs,
         config=cfg.to_dict(),
@@ -1253,6 +1382,16 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
         else:
             wandb_log_fn(compute_brief_metrics(self._moe_layer_loads, top_k=top_k), step=step)
 
+    def _aggregate_token_metric_stats(self, local_stats: dict[str, dict[str, float]]) -> dict[str, float]:
+        """Aggregate token logprob metrics across data-parallel ranks."""
+        if not torch.distributed.is_initialized():
+            return _format_token_metrics(local_stats)
+
+        dp_group = self._get_dp_group(include_cp=True)
+        gathered_stats = [None for _ in range(torch.distributed.get_world_size(group=dp_group))]
+        torch.distributed.all_gather_object(gathered_stats, local_stats, group=dp_group)
+        return _format_token_metrics(_merge_token_metric_stats([stats for stats in gathered_stats if stats]))
+
     def _setup_qat(self, cfg, model_parts: list[nn.Module]):
         if not cfg.get("qat.enabled", False):
             return None, None, None
@@ -1373,6 +1512,7 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             )
             for k, v in batch.items()
         }
+        _, sample_categories = _pop_token_metric_metadata(batch)
         train_ctx, batch = make_cp_batch_and_ctx(
             self.device_mesh,
             batch,
@@ -1447,6 +1587,11 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
                         )
                 else:
                     out = model(**batch)
+                    token_metric_buffer = getattr(self, "_token_metric_buffer", None)
+                    if token_metric_buffer is not None:
+                        token_metric_buffer.append(
+                            _compute_token_metric_stats(getattr(out, "logits", out), labels, sample_categories)
+                        )
 
                 local_loss = calculate_loss(
                     self.loss_fn,
@@ -1467,6 +1612,7 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             batches: List of batches of training data.
             max_grad_norm: Gradient clipping norm. Optional, if None will not clip gradients.
         """
+        self._token_metric_buffer = None
 
         num_label_tokens = torch.tensor(
             sum((batch["labels"] != -100).sum().item() for batch in batches), dtype=torch.long
@@ -1494,6 +1640,8 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             )
 
         loss_buffer = []
+        token_metric_buffer = []
+        self._token_metric_buffer = token_metric_buffer
 
         # number of tokens in the batch, excluding any tail padding.
         num_tokens_in_batch = torch.tensor(
@@ -1510,7 +1658,11 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
                 prepare_for_final_backward(self.model_parts, pp_enabled=self.pp_enabled)
 
             self._forward_backward_step(
-                i, batch, loss_buffer=loss_buffer, num_label_tokens=num_label_tokens, num_batches=num_batches
+                i,
+                batch,
+                loss_buffer=loss_buffer,
+                num_label_tokens=num_label_tokens,
+                num_batches=num_batches,
             )
 
             if i == 0:
@@ -1603,6 +1755,8 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
 
         reporting_loss = reporting_loss.cpu().item()
         # fix reporting_loss, tps across ranks
+        token_metrics = self._aggregate_token_metric_stats(_merge_token_metric_stats(token_metric_buffer))
+        self._token_metric_buffer = None
 
         return MetricsSample(
             step=self.step_scheduler.step,
@@ -1617,7 +1771,8 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
                 "mfu": mfu,
                 "num_tokens_per_step": num_tokens_in_batch,
                 "num_label_tokens": num_label_tokens,
-            },
+            }
+            | token_metrics,
         )
 
     @torch.no_grad()

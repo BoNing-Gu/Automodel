@@ -230,6 +230,7 @@ def default_collater(batch, pad_seq_len_divisible=None):
         dict: A dictionary containing batched tensors.
     """
     pad_token_ids = batch[0].pop("___PAD_TOKEN_IDS___", None)
+    metadata = {key: extract_key_from_dicts(batch, key) for key, value in batch[0].items() if isinstance(value, str)}
     # ans contains a dict with:
     # key: str (e.g., "input_ids", "attention_mask", "labels", "loss_mask")
     # value: list[list[int]] (e.g., [[1, 2, 3], [4, 5, 6]])
@@ -240,10 +241,12 @@ def default_collater(batch, pad_seq_len_divisible=None):
             pad_seq_len_divisible,
         )
         for key in batch[0].keys()
+        if key not in metadata
     }
 
     # convert to tensors
     result = {k: batchify(torch.LongTensor(v)) for k, v in ans.items()}
+    result.update(metadata)
 
     # Add padding_mask similar to cp_utils.py
     if "input_ids" in result:

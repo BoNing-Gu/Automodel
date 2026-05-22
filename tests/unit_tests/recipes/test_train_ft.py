@@ -33,6 +33,9 @@ from torch.utils.data import IterableDataset
 from nemo_automodel._transformers.model_init import resolve_sdpa_method
 from nemo_automodel.recipes.llm.train_ft import (
     TrainFinetuneRecipeForNextTokenPrediction,
+    _compute_token_metric_stats,
+    _format_token_metrics,
+    _merge_token_metric_stats,
     build_dataloader,
     build_model,
     build_optimizer,
@@ -686,6 +689,40 @@ def test_run_train_validation_loop_calls_gc_hook_once_per_step():
     trainer.run_train_validation_loop()
 
     trainer._maybe_collect_garbage.assert_called_once()
+
+
+def test_token_logprob_metrics_are_grouped_by_category():
+    logits = torch.log(torch.tensor([[[0.7, 0.3], [0.2, 0.8]], [[0.6, 0.4], [0.9, 0.1]]], dtype=torch.float32))
+    labels = torch.tensor([[0, 1], [1, -100]])
+
+    stats = _compute_token_metric_stats(logits, labels, ["cat_a", "cat_b"])
+    metrics = _format_token_metrics(stats)
+
+    expected_cat_a_loss = -torch.log(torch.tensor(0.7 * 0.8)).item()
+    expected_cat_b_loss = -torch.log(torch.tensor(0.4)).item()
+    expected_total_loss = expected_cat_a_loss + expected_cat_b_loss
+
+    assert metrics["_num_loss_tokens"] == 3
+    assert metrics["_num_loss_tokens/cat_a"] == 2
+    assert metrics["_num_loss_tokens/cat_b"] == 1
+    assert metrics["_loss_per_token/cat_a"] == pytest.approx(expected_cat_a_loss / 2)
+    assert metrics["_loss_per_token/cat_b"] == pytest.approx(expected_cat_b_loss)
+    assert metrics["_loss_per_token"] == pytest.approx(expected_total_loss / 3)
+    assert metrics["_min_logprob/cat_a"] == pytest.approx(torch.log(torch.tensor(0.7)).item())
+    assert metrics["_min_logprob/cat_b"] == pytest.approx(torch.log(torch.tensor(0.4)).item())
+
+
+def test_token_metric_stats_merge_categories():
+    merged = _merge_token_metric_stats(
+        [
+            {"cat": {"loss_sum": 2.0, "token_count": 2.0, "min_logprob": -0.5}},
+            {"cat": {"loss_sum": 3.0, "token_count": 1.0, "min_logprob": -1.5}},
+        ]
+    )
+
+    assert merged["cat"]["loss_sum"] == 5.0
+    assert merged["cat"]["token_count"] == 3.0
+    assert merged["cat"]["min_logprob"] == -1.5
 
 
 def test_compute_trust_remote_code_prefers_cfg_flag():

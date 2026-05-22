@@ -30,6 +30,11 @@ from nemo_automodel.components.datasets.llm.formatting_utils import (
     format_chat_template,
 )
 
+_METADATA_OUTPUT_KEY_MAP = {
+    "id": "sample_id",
+    "category": "sample_category",
+}
+
 
 def _is_hf_repo_id(val: str) -> bool:
     # Basic check: org/name without local path existing
@@ -298,6 +303,7 @@ class ChatDataset(Dataset):
         mask_reasoning_content: bool = False,
         unshifted: bool = False,
         skip_invalid_samples: bool = False,
+        metadata_keys: Optional[Sequence[str]] = None,
     ) -> None:
         """Load OpenAI-format chat rows and tokenize via the chat template.
 
@@ -317,6 +323,9 @@ class ChatDataset(Dataset):
             skip_invalid_samples: If ``True``, skip malformed JSONL lines when reading local files (warning logs
                 include skip counts). If ``False``, a bad line raises. Does not skip invalid structured rows after
                 load; those still raise when a sample is accessed.
+            metadata_keys: Optional row keys to preserve in each returned sample. ``id`` and ``category`` are exposed
+                as ``sample_id`` and ``sample_category`` so training code can consume them without passing them to the
+                model forward.
         """
         if tokenizer is None:
             raise ValueError("Tokenizer is required")
@@ -336,6 +345,7 @@ class ChatDataset(Dataset):
         self.mask_reasoning_content = mask_reasoning_content
         self.unshifted = unshifted
         self.skip_invalid_samples = skip_invalid_samples
+        self.metadata_keys = tuple(metadata_keys or ())
 
         self.dataset = _load_openai_messages(
             path_or_dataset_id,
@@ -376,4 +386,8 @@ class ChatDataset(Dataset):
             mask_reasoning_content=self.mask_reasoning_content,
             unshifted=self.unshifted,
         )
+        for key in self.metadata_keys:
+            output_key = _METADATA_OUTPUT_KEY_MAP.get(key, f"metadata_{key}")
+            value = row.get(key)
+            sample[output_key] = "" if value is None else str(value)
         return sample

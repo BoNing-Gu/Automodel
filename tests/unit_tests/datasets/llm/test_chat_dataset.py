@@ -347,6 +347,35 @@ def test_tool_calling_chat_dataset_happy_path_and_edge_cases(monkeypatch):
         _ = ds_bad[0]
 
 
+def test_chat_dataset_preserves_requested_metadata(monkeypatch):
+    class Tok:
+        eos_token_id = 1
+        chat_template = "{{ default }}"
+
+    tok = Tok()
+    monkeypatch.setattr(tcd, "_has_chat_template", lambda _tok: True)
+    monkeypatch.setattr(tcd, "_add_pad_token", lambda _tok: 3)
+    monkeypatch.setattr(
+        tcd, "format_chat_template", lambda *a, **k: {"input_ids": [1], "labels": [1], "attention_mask": [1]}
+    )
+    monkeypatch.setattr(
+        tcd,
+        "_load_openai_messages",
+        lambda *a, **k: [
+            {
+                "id": "00066667",
+                "category": "bit_manipulation",
+                "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+            }
+        ],
+    )
+
+    ds = tcd.ChatDataset("ignored", tok, metadata_keys=["id", "category"])
+
+    assert ds[0]["sample_id"] == "00066667"
+    assert ds[0]["sample_category"] == "bit_manipulation"
+
+
 def test_chat_dataset_skip_invalid_samples_does_not_filter_structured_bad_rows(monkeypatch):
     """skip_invalid_samples only affects JSONL parse errors, not invalid message rows after load."""
 
