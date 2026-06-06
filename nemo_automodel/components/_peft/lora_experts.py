@@ -24,6 +24,7 @@ from nemo_automodel.components.moe.experts import (
     _apply_bias,
     _permute_tokens_for_grouped_mm,
 )
+from nemo_automodel.components._peft.pissa import is_pissa_init, pissa_init_expert_weight_
 from nemo_automodel.shared.utils import dtype_from_str
 
 try:
@@ -124,15 +125,31 @@ class GroupedExpertsLoRA(GroupedExperts):
         Args:
             init_method (str): Initialization method ('xavier' or 'kaiming').
         """
-        if init_method == "xavier":
+        if is_pissa_init(init_method):
+            pissa_init_expert_weight_(
+                self.gate_and_up_projs.data,
+                self.lora_gate_and_up_A.data,
+                self.lora_gate_and_up_B.data,
+                self.scale,
+                init_method,
+            )
+            pissa_init_expert_weight_(
+                self.down_projs.data,
+                self.lora_down_A.data,
+                self.lora_down_B.data,
+                self.scale,
+                init_method,
+            )
+        elif init_method == "xavier":
             nn.init.xavier_normal_(self.lora_gate_and_up_A)
             nn.init.xavier_normal_(self.lora_down_A)
+            nn.init.zeros_(self.lora_gate_and_up_B)
+            nn.init.zeros_(self.lora_down_B)
         else:
             nn.init.kaiming_uniform_(self.lora_gate_and_up_A, a=math.sqrt(5))
             nn.init.kaiming_uniform_(self.lora_down_A, a=math.sqrt(5))
-
-        nn.init.zeros_(self.lora_gate_and_up_B)
-        nn.init.zeros_(self.lora_down_B)
+            nn.init.zeros_(self.lora_gate_and_up_B)
+            nn.init.zeros_(self.lora_down_B)
 
     def forward(self, x: torch.Tensor, token_mask: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor):
         """Forward pass for GroupedExpertsLoRA with LoRA injection.
@@ -442,15 +459,31 @@ class GroupedExpertsDeepEPLoRA(GroupedExpertsDeepEP):
         Args:
             init_method (str): Initialization method ('xavier' or 'kaiming').
         """
-        if init_method == "xavier":
+        if is_pissa_init(init_method):
+            pissa_init_expert_weight_(
+                self.gate_and_up_projs.data,
+                self.lora_gate_and_up_A.data,
+                self.lora_gate_and_up_B.data,
+                self.scale,
+                init_method,
+            )
+            pissa_init_expert_weight_(
+                self.down_projs.data,
+                self.lora_down_A.data,
+                self.lora_down_B.data,
+                self.scale,
+                init_method,
+            )
+        elif init_method == "xavier":
             nn.init.xavier_normal_(self.lora_gate_and_up_A)
             nn.init.xavier_normal_(self.lora_down_A)
+            nn.init.zeros_(self.lora_gate_and_up_B)
+            nn.init.zeros_(self.lora_down_B)
         else:
             nn.init.kaiming_uniform_(self.lora_gate_and_up_A, a=math.sqrt(5))
             nn.init.kaiming_uniform_(self.lora_down_A, a=math.sqrt(5))
-
-        nn.init.zeros_(self.lora_gate_and_up_B)
-        nn.init.zeros_(self.lora_down_B)
+            nn.init.zeros_(self.lora_gate_and_up_B)
+            nn.init.zeros_(self.lora_down_B)
 
     def forward(
         self,

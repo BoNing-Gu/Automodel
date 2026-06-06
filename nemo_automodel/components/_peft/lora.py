@@ -30,6 +30,7 @@ from nemo_automodel.components._peft.lora_kernel import (
     lora_forward_wrapper,
 )
 from nemo_automodel.components._peft.module_matcher import ModuleMatcher
+from nemo_automodel.components._peft.pissa import is_pissa_init, pissa_init_linear_weight_
 from nemo_automodel.components.moe.layers import GroupedExperts, GroupedExpertsDeepEP, GroupedExpertsTE
 from nemo_automodel.shared.import_utils import safe_import, safe_import_te
 from nemo_automodel.shared.utils import dtype_from_str
@@ -52,6 +53,7 @@ class PeftConfig:
     dropout: float = 0.0
     dropout_position: Literal["pre", "post"] = "post"
     lora_A_init: str = "xavier"
+    init_lora_weights: Optional[str] = None
     lora_dtype: Optional[torch.dtype] = None
     use_triton: bool = False
     moe_rank_scaling: bool = False
@@ -71,6 +73,7 @@ class PeftConfig:
             dropout=d.get("dropout", 0.0),
             dropout_position=d.get("dropout_position", "post"),
             lora_A_init=d.get("lora_A_init", "xavier"),
+            init_lora_weights=d.get("init_lora_weights", None),
             lora_dtype=d.get("lora_dtype", None),
             use_triton=d.get("use_triton", False),
             moe_rank_scaling=d.get("moe_rank_scaling", False),
@@ -148,11 +151,20 @@ class LinearLoRA(nn.Linear):
         Args:
             init_method (str): Method to initialize the LoRA weights.
         """
-        if init_method == "xavier":
+        if is_pissa_init(init_method):
+            pissa_init_linear_weight_(
+                self.weight.data,
+                self.lora_A.weight.data,
+                self.lora_B.weight.data,
+                self.scale,
+                init_method,
+            )
+        elif init_method == "xavier":
             nn.init.xavier_normal_(self.lora_A.weight.data)
+            self.lora_B.weight.data.fill_(0)
         else:
             nn.init.kaiming_uniform_(self.lora_A.weight.data, a=math.sqrt(5))
-        self.lora_B.weight.data.fill_(0)
+            self.lora_B.weight.data.fill_(0)
 
     @torch.no_grad
     @staticmethod
@@ -571,11 +583,12 @@ def apply_lora_to_linear_modules(
                         )
 
                 # Replace the module in the model
+                lora_init_method = peft_config.init_lora_weights or peft_config.lora_A_init
                 new_module = patch_moe_module(
                     module,
                     dim=moe_dim,
                     alpha=peft_config.alpha,
-                    lora_A_init_method=peft_config.lora_A_init,
+                    lora_A_init_method=lora_init_method,
                     lora_dtype=lora_dtype,
                 )
 
@@ -596,6 +609,7 @@ def apply_lora_to_linear_modules(
                 if quantization_config is not None and lora_dtype is None:
                     lora_dtype = _extract_base_dtype(quantization_config, torch.bfloat16)
 
+                lora_init_method = peft_config.init_lora_weights or peft_config.lora_A_init
                 patch_linear_module(
                     module,
                     dim=peft_config.dim,
@@ -603,7 +617,7 @@ def apply_lora_to_linear_modules(
                     use_dora=peft_config.use_dora,
                     dropout=peft_config.dropout,
                     dropout_position=peft_config.dropout_position,
-                    lora_A_init_method=peft_config.lora_A_init,
+                    lora_A_init_method=lora_init_method,
                     lora_dtype=lora_dtype,
                     use_triton=peft_config.use_triton,
                     layer_name=name,
