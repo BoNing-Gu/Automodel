@@ -18,7 +18,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Union
 
 from datasets import VerificationMode, load_dataset
 from torch.utils.data import Dataset
@@ -68,6 +68,48 @@ def _parse_split_slice(split: Optional[str]):
     start = int(match.group(2)) if match.group(2) else None
     end = int(match.group(3)) if match.group(3) else None
     return base, slice(start, end)
+
+
+def _normalize_category_filter(category_use_for_train: Optional[Union[str, Sequence[str]]]) -> Optional[set[str]]:
+    if category_use_for_train is None:
+        return None
+    if isinstance(category_use_for_train, str):
+        categories = [x.strip() for x in category_use_for_train.split(",")]
+    else:
+        categories = [str(x).strip() for x in category_use_for_train]
+    categories = [x for x in categories if x]
+    return set(categories) or None
+
+
+def _row_category(row: Mapping[str, Any]) -> str:
+    value = row.get("category")
+    if value is None and isinstance(row.get("metadata"), Mapping):
+        value = row["metadata"].get("category")
+    return "" if value is None else str(value)
+
+
+def _filter_dataset_by_category(dataset, categories: set[str]):
+    before = len(dataset)
+
+    if hasattr(dataset, "filter"):
+        filtered = dataset.filter(lambda row: _row_category(row) in categories)
+    else:
+        filtered = [row for row in dataset if _row_category(row) in categories]
+
+    after = len(filtered)
+    if after == 0:
+        raise ValueError(
+            "No training samples matched dataset.category_use_for_train="
+            f"{sorted(categories)} from {before} loaded sample(s)."
+        )
+
+    logging.getLogger(__name__).info(
+        "Filtered ChatDataset by category: kept %d/%d sample(s), categories=%s",
+        after,
+        before,
+        sorted(categories),
+    )
+    return filtered
 
 
 def _load_openai_messages(
@@ -304,6 +346,7 @@ class ChatDataset(Dataset):
         unshifted: bool = False,
         skip_invalid_samples: bool = False,
         metadata_keys: Optional[Sequence[str]] = None,
+        category_use_for_train: Optional[Union[str, Sequence[str]]] = None,
     ) -> None:
         """Load OpenAI-format chat rows and tokenize via the chat template.
 
@@ -326,6 +369,9 @@ class ChatDataset(Dataset):
             metadata_keys: Optional row keys to preserve in each returned sample. ``id`` and ``category`` are exposed
                 as ``sample_id`` and ``sample_category`` so training code can consume them without passing them to the
                 model forward.
+            category_use_for_train: Optional category or categories to keep for training. Values are matched against
+                each row's top-level ``category`` field, falling back to ``metadata.category`` when present. Strings
+                may contain comma-separated categories for CLI overrides.
         """
         if tokenizer is None:
             raise ValueError("Tokenizer is required")
@@ -346,6 +392,7 @@ class ChatDataset(Dataset):
         self.unshifted = unshifted
         self.skip_invalid_samples = skip_invalid_samples
         self.metadata_keys = tuple(metadata_keys or ())
+        self.category_use_for_train = _normalize_category_filter(category_use_for_train)
 
         self.dataset = _load_openai_messages(
             path_or_dataset_id,
@@ -354,6 +401,8 @@ class ChatDataset(Dataset):
             shuffle_seed=shuffle_seed,
             skip_invalid_samples=skip_invalid_samples,
         )
+        if self.category_use_for_train is not None:
+            self.dataset = _filter_dataset_by_category(self.dataset, self.category_use_for_train)
 
         # Ensure pad token presence for downstream padding
         eos_token_id = getattr(self.tokenizer, "eos_token_id", 0)

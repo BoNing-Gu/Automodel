@@ -376,6 +376,50 @@ def test_chat_dataset_preserves_requested_metadata(monkeypatch):
     assert ds[0]["sample_category"] == "bit_manipulation"
 
 
+def test_chat_dataset_filters_by_category_use_for_train(monkeypatch):
+    class Tok:
+        eos_token_id = 1
+        chat_template = "{{ default }}"
+
+    tok = Tok()
+    monkeypatch.setattr(tcd, "_has_chat_template", lambda _tok: True)
+    monkeypatch.setattr(tcd, "_add_pad_token", lambda _tok: 3)
+    monkeypatch.setattr(
+        tcd, "format_chat_template", lambda *a, **k: {"input_ids": [1], "labels": [1], "attention_mask": [1]}
+    )
+
+    dataset_rows = [
+        {
+            "id": "1",
+            "category": "algebra",
+            "messages": [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"}],
+        },
+        {
+            "id": "2",
+            "metadata": {"category": "geometry"},
+            "messages": [{"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2"}],
+        },
+        {
+            "id": "3",
+            "category": "logic",
+            "messages": [{"role": "user", "content": "q3"}, {"role": "assistant", "content": "a3"}],
+        },
+    ]
+    monkeypatch.setattr(tcd, "_load_openai_messages", lambda *a, **k: dataset_rows)
+
+    ds = tcd.ChatDataset("ignored", tok, metadata_keys=["id", "category"], category_use_for_train="algebra,geometry")
+    assert len(ds) == 2
+    assert ds[0]["sample_id"] == "1"
+    assert ds[1]["sample_id"] == "2"
+
+    ds = tcd.ChatDataset("ignored", tok, metadata_keys=["id"], category_use_for_train=["logic"])
+    assert len(ds) == 1
+    assert ds[0]["sample_id"] == "3"
+
+    with pytest.raises(ValueError, match="No training samples matched"):
+        tcd.ChatDataset("ignored", tok, category_use_for_train="number_theory")
+
+
 def test_chat_dataset_skip_invalid_samples_does_not_filter_structured_bad_rows(monkeypatch):
     """skip_invalid_samples only affects JSONL parse errors, not invalid message rows after load."""
 
